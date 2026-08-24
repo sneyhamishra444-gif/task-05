@@ -1,0 +1,746 @@
+openapi: 3.0.3
+info:
+  title: TaskFlow API
+  description: >
+    Backend API for TaskFlow, a lightweight multi-tenant project management
+    system. Covers Task 01 (data model), Task 02 (auth & RBAC), Task 03
+    (projects & tasks REST API), and Task 04 (background email
+    notifications on task assignment).
+  version: "1.0.0"
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Organization Members
+  - name: Projects
+  - name: Tasks
+  - name: Jobs
+  - name: Health
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  # ---------------------------------------------------------------- Auth
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user and create their organization
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name, organizationName]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 72 }
+                name: { type: string }
+                organizationName: { type: string }
+            example:
+              email: alice@acme.test
+              password: Password123!
+              name: Alice Admin
+              organizationName: Acme Corp
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Rate limited (10 req/min/IP)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+            example:
+              email: alice@acme.test
+              password: Password123!
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Exchange a refresh token for a new access+refresh token pair (rotates the refresh token)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  refreshToken: { type: string }
+        "401":
+          description: Invalid, expired, or revoked refresh token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke a single refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "204": { description: No Content }
+
+  /auth/logout-all:
+    post:
+      tags: [Auth]
+      summary: Revoke every active refresh token for the current user (bonus)
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the current authenticated user
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { description: Unauthorized }
+
+  # ------------------------------------------------------ Org Members
+  /orgs/{orgId}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+    get:
+      tags: [Organization Members]
+      summary: List members of an organization
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/OrgMember" }
+        "403": { description: Not a member of this org }
+    post:
+      tags: [Organization Members]
+      summary: Add an existing user to the org (org_admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [org_admin, member], default: member }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrgMember" }
+        "403": { description: Not org_admin }
+        "404": { description: No user with that email }
+        "409": { description: Already a member }
+
+  /orgs/{orgId}/members/{userId}/role:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/UserId"
+    patch:
+      tags: [Organization Members]
+      summary: Change a member's role (org_admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [org_admin, member] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrgMember" }
+        "403": { description: Not org_admin }
+        "404": { description: Membership not found }
+
+  /orgs/{orgId}/members/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/UserId"
+    delete:
+      tags: [Organization Members]
+      summary: Remove a member from the org (org_admin only)
+      responses:
+        "204": { description: No Content }
+        "403": { description: Not org_admin }
+        "404": { description: Membership not found }
+
+  # ---------------------------------------------------------- Projects
+  /orgs/{orgId}/projects:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+    get:
+      tags: [Projects]
+      summary: List projects (paginated)
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaginatedProjects" }
+    post:
+      tags: [Projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+
+  /orgs/{orgId}/projects/{projectId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Projects]
+      summary: Get a project
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "404": { description: Project not found }
+    patch:
+      tags: [Projects]
+      summary: Update a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+    delete:
+      tags: [Projects]
+      summary: Soft-delete a project (org_admin only)
+      responses:
+        "204": { description: No Content }
+        "403": { description: Not org_admin }
+        "404": { description: Project not found }
+
+  /orgs/{orgId}/projects/{projectId}/dashboard:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Projects]
+      summary: Task counts grouped by status for this project
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projectId: { type: string, format: uuid }
+                  total: { type: integer }
+                  byStatus:
+                    type: object
+                    properties:
+                      todo: { type: integer }
+                      in_progress: { type: integer }
+                      review: { type: integer }
+                      done: { type: integer }
+
+  # ------------------------------------------------------------- Tasks
+  /orgs/{orgId}/projects/{projectId}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Tasks]
+      summary: List tasks in a project (filters + pagination)
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [todo, in_progress, review, done] }
+        - name: priority
+          in: query
+          schema: { type: string, enum: [low, medium, high, urgent] }
+        - name: assignee
+          in: query
+          schema: { type: string, format: uuid }
+        - name: dueDateFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: dueDateTo
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaginatedTasks" }
+    post:
+      tags: [Tasks]
+      summary: Create a task in this project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                description: { type: string }
+                status: { type: string, enum: [todo, in_progress, review, done] }
+                priority: { type: string, enum: [low, medium, high, urgent] }
+                dueDate: { type: string, format: date-time }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+
+  /orgs/{orgId}/tasks/{taskId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [Tasks]
+      summary: Get a task
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "404": { description: Task not found }
+    patch:
+      tags: [Tasks]
+      summary: Update a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: string, nullable: true }
+                status: { type: string, enum: [todo, in_progress, review, done] }
+                priority: { type: string, enum: [low, medium, high, urgent] }
+                dueDate: { type: string, format: date-time, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+    delete:
+      tags: [Tasks]
+      summary: Soft-delete a task
+      responses:
+        "204": { description: No Content }
+
+  /orgs/{orgId}/tasks/bulk-status:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+    patch:
+      tags: [Tasks]
+      summary: Bulk-update status for multiple tasks (bonus)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [taskIds, status]
+              properties:
+                taskIds:
+                  type: array
+                  items: { type: string, format: uuid }
+                  minItems: 1
+                  maxItems: 200
+                status: { type: string, enum: [todo, in_progress, review, done] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updatedCount: { type: integer }
+                  updatedIds:
+                    type: array
+                    items: { type: string, format: uuid }
+
+  /orgs/{orgId}/tasks/search:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+    get:
+      tags: [Tasks]
+      summary: Full-text search over task title + description (bonus)
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaginatedTasks" }
+
+  /orgs/{orgId}/tasks/{taskId}/assignments:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [Tasks]
+      summary: List users assigned to a task
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Assignment" }
+    post:
+      tags: [Tasks]
+      summary: Assign a user to a task (enqueues an async email notification, Task 04)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assignment: { $ref: "#/components/schemas/Assignment" }
+                  task: { $ref: "#/components/schemas/Task" }
+                  assignedUser: { $ref: "#/components/schemas/User" }
+                  notificationJobId:
+                    type: string
+                    nullable: true
+                    description: BullMQ job id for GET /jobs/:id; null if deduped
+                  deduped:
+                    type: boolean
+                    description: true if a notification for this task+user was already enqueued within the last 5 seconds
+        "409": { description: Already assigned }
+        "422": { description: Target user is not a member of this org }
+
+  /orgs/{orgId}/tasks/{taskId}/assignments/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/OrgId"
+      - $ref: "#/components/parameters/TaskId"
+      - $ref: "#/components/parameters/UserId"
+    delete:
+      tags: [Tasks]
+      summary: Unassign a user from a task
+      responses:
+        "204": { description: No Content }
+        "404": { description: Assignment not found }
+
+  # -------------------------------------------------------------- Jobs
+  /jobs/{jobId}:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Jobs]
+      summary: Get the status of a background job (e.g. an assignment email notification)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobStatus" }
+        "403": { description: Not a member of the org this job belongs to }
+        "404": { description: Job not found }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrgId:
+      name: orgId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string }
+        details: { type: object }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        role: { type: string, enum: [org_admin, member] }
+
+    AuthResult:
+      type: object
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        organization: { $ref: "#/components/schemas/Organization" }
+        accessToken: { type: string }
+        refreshToken: { type: string }
+
+    OrgMember:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [org_admin, member] }
+        joinedAt: { type: string, format: date-time }
+
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        createdBy: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: string, format: date-time, nullable: true }
+
+    Task:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        status: { type: string, enum: [todo, in_progress, review, done] }
+        priority: { type: string, enum: [low, medium, high, urgent] }
+        dueDate: { type: string, format: date-time, nullable: true }
+        createdBy: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        deletedAt: { type: string, format: date-time, nullable: true }
+
+    Assignment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        assignedBy: { type: string, format: uuid, nullable: true }
+        assignedAt: { type: string, format: date-time }
+
+    PaginatedProjects:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Project" }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    PaginatedTasks:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Task" }
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+
+    JobStatus:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, active, completed, failed] }
+        metadata:
+          type: object
+          properties:
+            queue: { type: string }
+            attemptsMade: { type: integer }
+            maxAttempts: { type: integer }
+            failedReason: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time, nullable: true }
+            processedAt: { type: string, format: date-time, nullable: true }
+            finishedAt: { type: string, format: date-time, nullable: true }
+            data: { type: object }
